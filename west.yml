@@ -1,0 +1,6 @@
+# Copyright (C) 2025 Infineon Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+manifest:
+  self:
+    west-commands: scripts/west-commands.yml

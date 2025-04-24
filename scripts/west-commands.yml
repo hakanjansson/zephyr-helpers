@@ -1,0 +1,9 @@
+# Copyright (C) 2025 Infineon Technologies
+# SPDX-License-Identifier: Apache-2.0
+
+west-commands:
+  - file: scripts/validate_prework.py
+    commands:
+      - name: validate-prework
+        class: ValidatePrework
+        help: validate environment after prework
