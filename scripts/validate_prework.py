@@ -5,6 +5,10 @@ import sys
 import os
 import importlib
 import subprocess
+import platform
+import re
+import socket
+import struct
 
 from west.commands import WestCommand, Verbosity, CommandError
 from west import log, manifest
@@ -183,3 +187,105 @@ class ValidatePrework(WestCommand):
                 "No installed udev rule file '" + UDEV_RULE_PATH + "' found\n\t"
                 "https://docs.zephyrproject.org/latest/boards/infineon/cyw920829m2evk_02/doc/index.html#infineon-openocd-installation"
             )
+
+        # Check for usbipd server if platform is WSL
+        if sys.platform == "linux" and (
+            platform.uname().release.endswith("-Microsoft")
+            or platform.uname().release.endswith("microsoft-standard-WSL2")
+        ):
+            self.dbg("  -- WSL platform detected")
+            try:
+                # Execute ipconfig to find all network adapters on host
+                result = subprocess.run(
+                    ["ipconfig.exe"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+
+                if result.returncode == 0:
+                    ipv4_addresses = []
+                    for line in result.stdout.decode("utf-8").splitlines():
+                        m = re.search(
+                            r".*IPv4.*: *([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})",
+                            line,
+                        )
+                        if m:
+                            ipv4_addresses.append(m.group(1))
+
+                    usbipd_running = False
+                    for addr in ipv4_addresses:
+                        try:
+                            self.dbg(
+                                "     Searching for usbipd server at: "
+                                + addr
+                                + ":3240",
+                                level=Verbosity.DBG_MORE,
+                                end="",
+                            )
+                            s = socket.create_connection((addr, 3240), timeout=1)
+                            self.dbg(" - connected", level=Verbosity.DBG_MORE, end="")
+
+                            # Send OP_REQ_DEVLIST to usbipd server
+                            s.setblocking(1)
+                            s.settimeout(10)
+                            OP_REQ_DEVLIST = bytes(
+                                [0x01, 0x11, 0x80, 0x05, 0x00, 0x00, 0x00, 0x00]
+                            )
+                            s.send(OP_REQ_DEVLIST)
+
+                            # Receive OP_REP_DEVLIST from usbipd server
+                            OP_REP_DEVLIST = bytes()
+                            while True:
+                                chunk = s.recv(1024)
+                                OP_REP_DEVLIST += chunk
+                                if len(chunk) == 0:
+                                    s.close()
+                                    break
+
+                            # Validate server response
+                            if len(OP_REP_DEVLIST) >= 12:
+                                resp = struct.unpack(">HHII", OP_REP_DEVLIST[0:12])
+                                if (
+                                    resp[0] == 0x0111
+                                    and resp[1] == 0x0005
+                                    and resp[2] == 0x00000000
+                                ):
+                                    self.dbg(
+                                        " -",
+                                        resp[3],
+                                        "exported device(s)",
+                                        level=Verbosity.DBG_MORE,
+                                    )
+                                    self.dbg(
+                                        "       usbipd server found at "
+                                        + addr
+                                        + ":3240"
+                                    )
+                                    usbipd_running = True
+                                    break
+                                else:
+                                    self.dbg(
+                                        " - bad OP_REP_DEVLIST response",
+                                        level=Verbosity.DBG_MORE,
+                                        end="",
+                                    )
+
+                        except TimeoutError:
+                            self.dbg(" - TIMEOUT", level=Verbosity.DBG_MORE, end="")
+
+                        self.dbg("\n", level=Verbosity.DBG_MORE, end="")
+
+                    if not usbipd_running:
+                        self.err(
+                            "WSL platform detected but no connectable usbipd server found\n\t"
+                            "See: https://learn.microsoft.com/en-us/windows/wsl/connect-usb#install-the-usbipd-win-project"
+                        )
+
+                else:
+                    self.err(
+                        "Failed to get Windows network adapters using 'ipconfig.exe':\n\t"
+                    )
+                    self.dbg(result.stdout.decode("utf-8"), level=Verbosity.DBG_MORE)
+
+            except FileNotFoundError:
+                self.err("Couldn't find executable 'ipconfig.exe'")
